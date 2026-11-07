@@ -2,382 +2,438 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
-<title>ЭХО РУИН — прототип (кейс-задача 5)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>ЭХО РУИН — прототип</title>
 <style>
-  html,body{margin:0;padding:0;background:#0b0f14;display:flex;justify-content:center;align-items:center;min-height:100vh;}
-  canvas{border:1px solid #223;box-shadow:0 0 40px rgba(60,220,220,.08);}
+  html, body { margin:0; padding:0; background:#0a0e14; height:100%; overflow:hidden; }
+  #wrap { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; }
+  canvas { display:block; background:#0a0e14; max-width:100vw; max-height:100vh; }
+  #overlay { position:fixed; inset:0; background:rgba(5,8,12,.88); display:flex; flex-direction:column;
+             align-items:center; justify-content:center; color:#cfe8ff; font-family:'Segoe UI',Arial,sans-serif;
+             text-align:center; z-index:10; cursor:pointer; }
+  #overlay h1 { color:#43e8d8; font-size:42px; margin:0 0 10px; letter-spacing:4px; }
+  #overlay p  { margin:6px 0; color:#9fb3c8; font-size:16px; }
+  #overlay .go { margin-top:22px; color:#fff; border:1px solid #43e8d8; padding:10px 26px; border-radius:6px; font-size:18px; }
+  #touch { position:fixed; bottom:0; left:0; right:0; display:none; z-index:5; user-select:none; }
+  #touch div { position:absolute; bottom:14px; width:64px; height:64px; border-radius:50%;
+               background:rgba(67,232,216,.18); border:1px solid rgba(67,232,216,.55); color:#cfe8ff;
+               font-size:13px; display:flex; align-items:center; justify-content:center; font-family:sans-serif; }
+  #err { position:fixed; top:0; left:0; right:0; background:#5a1f1f; color:#ffd9d9; font:14px monospace;
+         padding:8px; display:none; z-index:99; white-space:pre-wrap; }
 </style>
 </head>
 <body>
-<canvas id="g" width="960" height="540"></canvas>
+<div id="err"></div>
+<div id="wrap"><canvas id="cv" width="960" height="540" tabindex="0"></canvas></div>
+
+<div id="overlay">
+  <h1>ЭХО РУИН</h1>
+  <p>Клик — начать (или любая клавиша)</p>
+  <p>&#8592; &#8594; или A/D — движение &nbsp;&nbsp; ПРОБЕЛ — прыжок</p>
+  <p>X — рывок (оглушает врагов) &nbsp;&nbsp; E — ЭХО-ИМПУЛЬС (открывает мосты)</p>
+  <p>Дойдите до светящегося ядра в конце уровня</p>
+  <div class="go">НАЧАТЬ</div>
+</div>
+
+<div id="touch">
+  <div style="left:16px;"   data-k="left">&#8592;</div>
+  <div style="left:92px;"   data-k="right">&#8594;</div>
+  <div style="right:92px;"  data-k="jump">JUMP</div>
+  <div style="right:16px;"  data-k="pulse">PULSE</div>
+  <div style="right:168px;" data-k="dash">DASH</div>
+</div>
+
 <script>
-"use strict";
-// ================== ЭХО РУИН: браузерный прототип ==================
-// Механики: движение+прыжок (coyote time, jump buffer), рывок с i-frames,
-// эхо-импульс (сонар: открывает скрытые мосты, оглушает врагов),
-// враги-дроны (патруль/погоня), шипы, чекпоинты, адаптивная сложность, 2 уровня.
+// --- показ любых ошибок на экране, чтобы их было видно без консоли ---
+window.onerror = function(msg, src, line) {
+  var e = document.getElementById('err');
+  e.style.display = 'block';
+  e.textContent = 'Ошибка: ' + msg + ' (строка ' + line + ')';
+};
 
-const cvs = document.getElementById('g'), ctx = cvs.getContext('2d');
-const T = 32, W = cvs.width, H = cvs.height;
-const GRAV = 0.5, JUMP = -11.5, SPD = 3.4;
+(function() {
+'use strict';
 
-// ---------- УРОВНИ ('#' стена, '~' скрытый мост, '^' шипы, P игрок, E враг, C чекпоинт, G цель) ----------
-const LEVELS = [
-[
-"##############################################",
-"#............................................#",
-"#............................................#",
-"#............................................#",
-"#............................................#",
-"#............................................#",
-"#............................................#",
-"#.............###............................#",
-"#...............................E............#",
-"#.......###..................###.............#",
-"#............................................#",
-"#.P.........E.............C...E.............G#",
-"#.................^~~~^.............^~~~^....#",
-"##############################################"
-],
-[
-"##############################################",
-"#............................................#",
-"#............................................#",
-"#............................................#",
-"#............................................#",
-"#................E...........................#",
-"#..............###...........................#",
-"#....................E.......................#",
-"#...................###......................#",
-"#...###.......................###............#",
-"#............................................#",
-"#......E.........E..^^.........EC...........G#",
-"#.........^~~~^.........^~~~^.....^~~~^......#",
-"##############################################"
-]
+var cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+var W = cv.width, H = cv.height;
+
+// ---------- ввод ----------
+var keys = { left:false, right:false, jump:false, jumpPressed:false, dash:false, dashPressed:false, pulsePressed:false };
+
+window.addEventListener('keydown', function(e) {
+  var k = e.code || e.key;
+  if (k === 'ArrowLeft'  || k === 'KeyA') keys.left = true;
+  if (k === 'ArrowRight' || k === 'KeyD') keys.right = true;
+  if (k === 'Space' || k === 'ArrowUp' || k === 'KeyW') { keys.jump = true; keys.jumpPressed = true; }
+  if (k === 'KeyX' || k === 'ShiftLeft' || k === 'ShiftRight') { keys.dash = true; keys.dashPressed = true; }
+  if (k === 'KeyE' || k === 'KeyF') keys.pulsePressed = true;
+  if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space'].indexOf(k) >= 0) e.preventDefault();
+});
+window.addEventListener('keyup', function(e) {
+  var k = e.code || e.key;
+  if (k === 'ArrowLeft'  || k === 'KeyA') keys.left = false;
+  if (k === 'ArrowRight' || k === 'KeyD') keys.right = false;
+  if (k === 'Space' || k === 'ArrowUp' || k === 'KeyW') keys.jump = false;
+  if (k === 'KeyX' || k === 'ShiftLeft' || k === 'ShiftRight') keys.dash = false;
+});
+
+// сенсорные кнопки — появляются на телефонах
+if ('ontouchstart' in window) document.getElementById('touch').style.display = 'block';
+var touchEls = document.getElementById('touch').children;
+for (var ti = 0; ti < touchEls.length; ti++) {
+  (function(el) {
+    var k = el.getAttribute('data-k');
+    var press = function(e) { e.preventDefault();
+      if (k === 'left' || k === 'right') keys[k] = true;
+      if (k === 'jump') { keys.jump = true; keys.jumpPressed = true; }
+      if (k === 'dash') { keys.dash = true; keys.dashPressed = true; }
+      if (k === 'pulse') keys.pulsePressed = true;
+    };
+    var release = function(e) {
+      if (k === 'left' || k === 'right') keys[k] = false;
+      if (k === 'jump') keys.jump = false;
+      if (k === 'dash') keys.dash = false;
+    };
+    el.addEventListener('touchstart', press, {passive:false});
+    el.addEventListener('touchend', release);
+    el.addEventListener('touchcancel', release);
+  })(touchEls[ti]);
+}
+
+// ---------- уровни ----------
+// platform: {x,y,w,h}; spikes: {x,y,w}; enemy: {x,y,minX,maxX}; bridge: скрытая платформа, открывается импульсом
+var LEVELS = [
+  { // Уровень 1: "Бетоновый Прибой"
+    width: 3600, spawnX: 60, spawnY: 470,
+    platforms: [
+      {x:0,y:520,w:600,h:130}, {x:700,y:520,w:420,h:130}, {x:1220,y:520,w:330,h:130},
+      {x:1900,y:520,w:420,h:130}, {x:2420,y:460,w:200,h:60}, {x:2700,y:520,w:900,h:130},
+      {x:980,y:400,w:130,h:20}, {x:2100,y:390,w:130,h:20}
+    ],
+    bridges: [ {x:1650,y:520,w:250,h:16} ],
+    spikes: [ {x:1020,y:520,w:60}, {x:2000,y:520,w:50}, {x:2900,y:520,w:80} ],
+    enemies: [ {x:800,y:470,minX:720,maxX:1080}, {x:1350,y:470,minX:1240,maxX:1520}, {x:2900,y:470,minX:2720,maxX:3560} ],
+    checkpoints: [ {x:1240,y:470} ],
+    core: {x:3480,y:440}
+  },
+  { // Уровень 2: "Сад Датчиков"
+    width: 4200, spawnX: 60, spawnY: 470,
+    platforms: [
+      {x:0,y:520,w:480,h:130}, {x:580,y:460,w:280,h:60}, {x:960,y:520,w:320,h:130},
+      {x:1620,y:520,w:360,h:130}, {x:2080,y:420,w:200,h:40}, {x:2360,y:520,w:340,h:130},
+      {x:2800,y:440,w:180,h:40}, {x:3060,y:520,w:1140,h:130},
+      {x:820,y:360,w:120,h:18}, {x:1180,y:300,w:120,h:18}, {x:2180,y:300,w:110,h:18}
+    ],
+    bridges: [ {x:1300,y:520,w:300,h:16}, {x:2700,y:520,w:100,h:16} ],
+    spikes: [ {x:1060,y:520,w:50}, {x:1700,y:520,w:50}, {x:3500,y:520,w:100} ],
+    enemies: [ {x:620,y:400,minX:585,maxX:830}, {x:1050,y:470,minX:965,maxX:1250}, {x:1750,y:470,minX:1640,maxX:1940}, {x:3300,y:470,minX:3080,maxX:4140} ],
+    checkpoints: [ {x:970,y:470}, {x:2400,y:470} ],
+    core: {x:4080,y:440}
+  }
 ];
 
-// ---------- СОСТОЯНИЕ ----------
-let level = 0, grid = [], cols = 0, rows = 0;
-let player = null, enemies = [], checkpoints = [], goal = null;
-let revealed = new Map(), pulse = null, pulseCd = 0;
-let adapt = 1.0, deaths = 0, sinceDeath = 0, won = false, state = 'start';
-let cam = {x:0, y:0};
-const keys = {}, pressed = {};
+// ---------- состояние ----------
+var state = 'menu';          // menu | play | win
+var levelIdx = 0, lvl = null;
+var player, enemies, bridges, ring, diff, deaths, lastDeath, camX, t;
+var PULSE_RADIUS = 340, PULSE_DUR = 300;   // мост открыт 5 секунд (300 кадров @60fps)
 
-// ---------- ЗАГРУЗКА УРОВНЯ ----------
-function loadLevel(i){
-  grid = LEVELS[i].map(r => r.split(''));
-  rows = grid.length; cols = grid[0].length;
-  enemies = []; checkpoints = []; goal = null; revealed = new Map(); pulse = null; pulseCd = 0;
-  let spawn = {x:64, y:64};
-  for(let r=0; r<rows; r++){
-    for(let c=0; c<cols; c++){
-      const ch = grid[r][c];
-      if(ch==='P'){ spawn = {x:c*T+5, y:r*T+4}; grid[r][c]='.'; }
-      else if(ch==='E'){ enemies.push({x:c*T+3, y:r*T+6, w:26, h:26, vx:0, vy:0, dir:1, stun:0, onG:false}); grid[r][c]='.'; }
-      else if(ch==='C'){ checkpoints.push({x:c*T, y:r*T, active:false}); grid[r][c]='.'; }
-      else if(ch==='G'){ goal = {x:c*T, y:r*T}; grid[r][c]='.'; }
+function loadLevel(i) {
+  lvl = LEVELS[i];
+  player = { x:lvl.spawnX, y:lvl.spawnY, w:28, h:36, vx:0, vy:0, onGround:false,
+             coyote:0, buffer:0, dashT:0, dashCd:0, invuln:0, hp:3, face:1, pulseCd:0 };
+  enemies = [];
+  for (var j = 0; j < lvl.enemies.length; j++) {
+    var e = lvl.enemies[j];
+    enemies.push({ x:e.x, y:e.y, w:30, h:30, dir:1, stun:0, baseX:e.x, minX:e.minX, maxX:e.maxX, flash:0 });
+  }
+  bridges = [];
+  for (var b = 0; b < lvl.bridges.length; b++) bridges.push({ r:lvl.bridges[b], timer:0 });
+  ring = null; camX = 0; t = 0;
+  if (i === 0) { diff = 1; deaths = 0; lastDeath = -999; }
+}
+
+function respawn() {
+  player.x = lvl.spawnX; player.y = lvl.spawnY;
+  // возвращаем на последний чекпоинт
+  for (var i = 0; i < lvl.checkpoints.length; i++) {
+    var c = lvl.checkpoints[i];
+    if (player.lastCheck && c.x <= player.lastCheck) { player.x = c.x; player.y = c.y; }
+  }
+  player.vx = 0; player.vy = 0; player.hp = 3; player.invuln = 60; player.dashT = 0;
+}
+
+function hitPlayer() {
+  if (player.invuln > 0 || player.dashT > 0) return;
+  player.hp--; player.invuln = 70;
+  if (player.hp <= 0) {
+    deaths++; lastDeath = t;
+    diff = Math.min(1.5, diff + 0.15);
+    respawn();
+  }
+}
+
+function firePulse() {
+  if (player.pulseCd > 0) return;
+  player.pulseCd = 180;
+  ring = { x:player.x + player.w/2, y:player.y + player.h/2, r:0 };
+  for (var b = 0; b < bridges.length; b++) bridges[b].timer = PULSE_DUR;
+  for (var e = 0; e < enemies.length; e++) {
+    var en = enemies[e];
+    var dx = (en.x + en.w/2) - ring.x, dy = (en.y + en.h/2) - ring.y;
+    if (dx*dx + dy*dy <= PULSE_RADIUS*PULSE_RADIUS) { en.stun = 180; en.flash = 30; }
+  }
+}
+
+// ---------- физика ----------
+function overlap(a, b) { return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
+
+function solidRects() {
+  var list = [];
+  for (var i = 0; i < lvl.platforms.length; i++) list.push(lvl.platforms[i]);
+  for (var b = 0; b < bridges.length; b++) if (bridges[b].timer > 0) list.push(bridges[b].r);
+  return list;
+}
+
+function moveX(rects, dx) {
+  player.x += dx;
+  for (var i = 0; i < rects.length; i++) {
+    if (overlap(player, rects[i])) {
+      if (dx > 0) player.x = rects[i].x - player.w;
+      else if (dx < 0) player.x = rects[i].x + rects[i].w;
+      player.vx = 0;
     }
   }
-  player = {x:spawn.x, y:spawn.y, w:22, h:28, vx:0, vy:0, onG:false, coyote:0, jbuf:0,
-            face:1, dashT:0, dashCd:0, iFr:0, health:3, respawn:{x:spawn.x, y:spawn.y}};
 }
 
-// ---------- КОЛЛИЗИИ ----------
-function solid(c, r){
-  if(c<0 || c>=cols || r<0 || r>=rows) return true;
-  const ch = grid[r][c];
-  if(ch==='#') return true;
-  if(ch==='~' && (revealed.get(r*100+c)||0) > 0) return true;
-  return false;
-}
-function rectSolid(x, y, w, h){
-  const c0 = Math.floor(x/T), c1 = Math.floor((x+w-0.01)/T);
-  const r0 = Math.floor(y/T), r1 = Math.floor((y+h-0.01)/T);
-  for(let r=r0; r<=r1; r++) for(let c=c0; c<=c1; c++) if(solid(c,r)) return true;
-  return false;
-}
-function moveX(e, dx){
-  while(Math.abs(dx) > 0.001){
-    const s = Math.sign(dx);
-    if(rectSolid(e.x+s, e.y, e.w, e.h)){ e.vx = 0; return true; }
-    e.x += s; dx -= s;
-  }
-  return false;
-}
-function moveY(e, dy){
-  while(Math.abs(dy) > 0.001){
-    const s = Math.sign(dy);
-    if(rectSolid(e.x, e.y+s, e.w, e.h)){ e.vy = 0; return true; }
-    e.y += s; dy -= s;
-  }
-  return false;
-}
-function overlap(a, b){ return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y; }
-
-// ---------- ЭХО-ИМПУЛЬС ----------
-function firePulse(){
-  const px = player.x+player.w/2, py = player.y+player.h/2;
-  pulse = {x:px, y:py, r:0};
-  for(let r=0; r<rows; r++) for(let c=0; c<cols; c++){
-    if(grid[r][c]==='~'){
-      const dx = c*T+T/2-px, dy = r*T+T/2-py;
-      if(dx*dx+dy*dy <= 220*220) revealed.set(r*100+c, 320);
+function moveY(rects, dy) {
+  player.y += dy;
+  for (var i = 0; i < rects.length; i++) {
+    if (overlap(player, rects[i])) {
+      if (dy > 0) { player.y = rects[i].y - player.h; player.vy = 0; player.onGround = true; }
+      else if (dy < 0) { player.y = rects[i].y + rects[i].h; player.vy = 0; }
     }
   }
-  for(const e of enemies){
-    const dx = e.x+e.w/2-px, dy = e.y+e.h/2-py;
-    if(dx*dx+dy*dy <= 220*220) e.stun = 200;
+}
+
+function update() {
+  t++;
+  if (player.pulseCd > 0) player.pulseCd--;
+  if (keys.pulsePressed) { keys.pulsePressed = false; firePulse(); }
+
+  // движение
+  var acc = 0.5, maxV = 4.2;
+  if (keys.left)  { player.vx = Math.max(player.vx - acc, -maxV); player.face = -1; }
+  if (keys.right) { player.vx = Math.min(player.vx + acc,  maxV); player.face = 1; }
+  if (!keys.left && !keys.right) player.vx *= 0.82;
+
+  // прыжок: coyote time + jump buffer
+  if (player.onGround) player.coyote = 8; else if (player.coyote > 0) player.coyote--;
+  if (player.buffer > 0) player.buffer--;
+  if (keys.jumpPressed) { keys.jumpPressed = false; player.buffer = 8; }
+  if (player.buffer > 0 && player.coyote > 0) {
+    player.vy = -11.5; player.coyote = 0; player.buffer = 0; player.onGround = false;
   }
-}
-
-// ---------- УРОН И СМЕРТЬ ----------
-function hurt(){
-  if(player.iFr > 0 || player.dashT > 0) return;
-  player.health--; player.iFr = 70; player.vy = -6; player.vx = -player.face*4;
-  if(player.health <= 0) die();
-}
-function die(){
-  deaths++; sinceDeath = 0;
-  adapt = Math.min(1.5, adapt + 0.15);          // адаптивная сложность: смерть повышает давление
-  player.x = player.respawn.x; player.y = player.respawn.y;
-  player.vx = 0; player.vy = 0; player.health = 3; player.iFr = 60;
-}
-
-// ---------- ОБНОВЛЕНИЕ ----------
-function update(){
-  if(state !== 'play' || won) return;
-  sinceDeath++;
-  if(sinceDeath > 1500){ adapt = Math.max(0.8, adapt - 0.05); sinceDeath = 0; }  // отдых снижает давление
-  const p = player;
-
-  // ввод
-  const dir = (keys.ArrowRight||keys.KeyD?1:0) - (keys.ArrowLeft||keys.KeyA?1:0);
-  if(dir) p.face = dir;
+  // регулируемый прыжок: отпустил кнопку — прыжок обрезается
+  if (player.vy < -4 && !keys.jump) player.vy = -4;
 
   // рывок
-  if(pressed.ShiftLeft || pressed.ShiftRight || pressed.KeyX){
-    if(p.dashCd <= 0 && p.dashT <= 0){ p.dashT = 10; p.dashCd = 60; }
+  if (player.dashCd > 0) player.dashCd--;
+  if (keys.dashPressed) { keys.dashPressed = false;
+    if (player.dashCd <= 0) { player.dashT = 10; player.dashCd = 70; player.invuln = Math.max(player.invuln, 14); }
   }
-  if(p.dashT > 0){ p.dashT--; p.vx = p.face*8; p.vy = 0; }
-  else {
-    p.vx += (dir*SPD - p.vx)*0.3;
-    p.vy += GRAV; if(p.vy > 12) p.vy = 12;
-  }
+  if (player.dashT > 0) { player.dashT--; player.vx = player.face * 12; player.vy = 0; }
 
-  // прыжок: буфер + coyote time
-  if(pressed.Space || pressed.ArrowUp || pressed.KeyW) p.jbuf = 6;
-  if(p.jbuf > 0 && (p.onG || p.coyote > 0) && p.dashT <= 0){
-    p.vy = JUMP; p.jbuf = 0; p.coyote = 0;
-  }
-  if(p.jbuf > 0) p.jbuf--;
+  player.vy += 0.55;
+  if (player.vy > 14) player.vy = 14;
+  if (player.invuln > 0) player.invuln--;
 
-  moveX(p, p.vx); moveY(p, p.vy);
-  p.onG = rectSolid(p.x, p.y+1, p.w, p.h);
-  p.coyote = p.onG ? 6 : Math.max(0, p.coyote-1);
-  if(p.dashCd > 0) p.dashCd--;
-  if(p.iFr > 0) p.iFr--;
+  var rects = solidRects();
+  player.onGround = false;
+  moveX(rects, player.vx);
+  moveY(rects, player.vy);
 
-  // эхо-импульс
-  if(p.pulseCd > 0) p.pulseCd--;
-  if((pressed.KeyE || pressed.KeyQ) && p.pulseCd <= 0){ p.pulseCd = 90; firePulse(); }
-  if(pulse){ pulse.r += 14; if(pulse.r > 240) pulse = null; }
-  for(const [k, v] of revealed){ if(v <= 1) revealed.delete(k); else revealed.set(k, v-1); }
+  // мосты угасают
+  for (var b = 0; b < bridges.length; b++) if (bridges[b].timer > 0) bridges[b].timer--;
 
-  // падение в бездну
-  if(p.y > rows*T + 80) die();
-
-  // шипы (из сетки '^')
-  for(let r=0; r<rows; r++) for(let c=0; c<cols; c++){
-    if(grid[r][c]==='^'){
-      const s = {x:c*T+4, y:r*T+18, w:T-8, h:14};
-      if(overlap(p, s)) hurt();
-    }
+  // шипы
+  for (var s = 0; s < lvl.spikes.length; s++) {
+    var sp = lvl.spikes[s];
+    if (overlap(player, {x:sp.x, y:sp.y - 16, w:sp.w, h:16})) hitPlayer();
   }
 
-  // чекпоинты
-  for(const cp of checkpoints){
-    if(overlap(p, {x:cp.x, y:cp.y, w:T, h:T})){ cp.active = true; p.respawn = {x:cp.x+5, y:cp.y+4}; }
-  }
-
-  // цель
-  if(goal && overlap(p, {x:goal.x, y:goal.y, w:T, h:T})){
-    level++;
-    if(level >= LEVELS.length) won = true; else loadLevel(level);
-    return;
+  // падение в пропасть
+  if (player.y > H + 300) {
+    deaths++; lastDeath = t;
+    diff = Math.min(1.5, diff + 0.15);
+    respawn();
   }
 
   // враги
-  for(const e of enemies){
-    if(e.stun > 0){ e.stun--; continue; }
-    const px = p.x - e.x, py = p.y - e.y;
-    const chasing = Math.abs(px) < 170 && Math.abs(py) < 70;
-    const spd = (chasing ? 1.8 : 1.1) * adapt;
-    if(chasing) e.dir = Math.sign(px) || e.dir;
-    e.vx = e.dir * spd;
-    e.vy += GRAV; if(e.vy > 12) e.vy = 12;
-    const hitWall = moveX(e, e.vx);
-    moveY(e, e.vy);
-    e.onG = rectSolid(e.x, e.y+1, e.w, e.h);
-    if(hitWall) e.dir *= -1;
-    if(e.onG){ // не падать с уступа при патруле
-      const ahead = Math.floor((e.x + (e.dir>0 ? e.w+2 : -2))/T);
-      const below = Math.floor((e.y+e.h+2)/T);
-      if(!chasing && !solid(ahead, below)) e.dir *= -1;
+  for (var e = 0; e < enemies.length; e++) {
+    var en = enemies[e];
+    if (en.stun > 0) { en.stun--; if (en.flash > 0) en.flash--; continue; }
+    var dx = player.x - en.x, dist = Math.abs(dx), chasing = false;
+    if (dist < 260 && Math.abs(player.y - en.y) < 90 && player.x > lvl.spawnX) chasing = true;
+    var sp2 = (chasing ? 2.1 : 1.3) * diff;
+    if (chasing) en.dir = dx > 0 ? 1 : -1;
+    else {
+      if (en.x <= en.minX) en.dir = 1;
+      if (en.x + en.w >= en.maxX) en.dir = -1;
     }
-    if(overlap(p, e)){
-      if(p.dashT > 0) e.stun = 140;   // рывок оглушает
-      else hurt();
+    var nx = en.x + en.dir * sp2;
+    // патруль не падает с платформы (проверка земли впереди)
+    if (!chasing) {
+      var probe = {x: en.dir > 0 ? en.x + en.w + 4 : en.x - 8, y: en.y + en.h + 2, w:4, h:8};
+      var ground = false;
+      for (var i = 0; i < lvl.platforms.length; i++) if (overlap(probe, lvl.platforms[i])) { ground = true; break; }
+      if (!ground) en.dir *= -1; else en.x = nx;
+    } else en.x = nx;
+    en.y += 0.55; // упрощённая гравитация врагов (стоп по платформе ниже)
+    var landed = false;
+    for (var p = 0; p < lvl.platforms.length; p++) {
+      var pl = lvl.platforms[p];
+      if (overlap(en, pl) && en.vy >= 0) { en.y = pl.y - en.h; landed = true; }
+    }
+    if (!landed && en.y > 900) { en.y = lvl.enemies[e].y; en.x = lvl.enemies[e].x; }
+    else if (landed) en.vy = 0; else en.vy = (en.vy || 0) + 0.55;
+
+    // контакт с игроком
+    if (overlap(player, en)) {
+      if (player.dashT > 0) { en.stun = 180; en.flash = 30; }  // рывок оглушает
+      else hitPlayer();
     }
   }
+
+  // кольцо импульса расширяется
+  if (ring) { ring.r += 9; if (ring.r > PULSE_RADIUS + 60) ring = null; }
+
+  // чекпоинт
+  for (var c = 0; c < lvl.checkpoints.length; c++) {
+    var cp = lvl.checkpoints[c];
+    if (Math.abs(player.x - cp.x) < 30) player.lastCheck = cp.x;
+  }
+
+  // финиш
+  var core = lvl.core;
+  if (Math.abs(player.x - core.x) < 40 && Math.abs(player.y - core.y) < 80) {
+    if (levelIdx < LEVELS.length - 1) { levelIdx++; loadLevel(levelIdx); }
+    else state = 'win';
+  }
+
+  // адаптивная сложность: полминуты без смертей — немного мягче
+  if (t - lastDeath > 1800 && diff > 0.8) diff = Math.max(0.8, diff - 0.01);
 
   // камера
-  cam.x += ((p.x + p.w/2 - W/2) - cam.x)*0.12;
-  cam.y += ((p.y + p.h/2 - H/2) - cam.y)*0.12;
-  cam.x = Math.max(0, Math.min(cam.x, cols*T - W));
-  cam.y = Math.max(0, Math.min(cam.y, rows*T - H));
-
-  for(const k in pressed) pressed[k] = false;
+  var target = player.x - W/2 + player.w/2;
+  camX += (Math.max(0, Math.min(target, lvl.width - W)) - camX) * 0.12;
 }
 
-// ---------- ОТРИСОВКА ----------
-function draw(){
-  // фон
-  const g1 = ctx.createLinearGradient(0,0,0,H);
-  g1.addColorStop(0,'#0b1220'); g1.addColorStop(1,'#141b26');
-  ctx.fillStyle = g1; ctx.fillRect(0,0,W,H);
-  // параллакс-руины
-  ctx.fillStyle = 'rgba(40,55,75,0.5)';
-  for(let i=0;i<8;i++){
-    const bx = ((i*260 - cam.x*0.3) % (W+300) + W+300) % (W+300) - 150;
-    ctx.fillRect(bx, H-260 - (i%3)*40, 120, 260);
-  }
-  ctx.fillStyle = 'rgba(28,40,58,0.8)';
-  for(let i=0;i<10;i++){
-    const bx = ((i*200 - cam.x*0.6) % (W+240) + W+240) % (W+240) - 120;
-    ctx.fillRect(bx, H-180, 90, 180);
-  }
+// ---------- отрисовка ----------
+function draw() {
+  var g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0b1220'); g.addColorStop(1, '#101c2b');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
 
-  ctx.save(); ctx.translate(-Math.round(cam.x), -Math.round(cam.y));
+  ctx.save();
+  ctx.translate(-Math.round(camX), 0);
 
-  const c0 = Math.floor(cam.x/T), c1 = Math.min(cols-1, c0 + W/T + 1);
-  const r0 = Math.floor(cam.y/T), r1 = Math.min(rows-1, r0 + H/T + 1);
-  for(let r=r0; r<=r1; r++) for(let c=c0; c<=c1; c++){
-    const ch = grid[r][c], x = c*T, y = r*T;
-    if(ch==='#'){
-      ctx.fillStyle = '#3a4a5e'; ctx.fillRect(x,y,T,T);
-      ctx.fillStyle = '#4d6278'; ctx.fillRect(x,y,T,4);
-    } else if(ch==='~'){
-      const t = revealed.get(r*100+c) || 0;
-      if(t > 0){
-        ctx.fillStyle = 'rgba(70,220,220,' + Math.min(1, t/90).toFixed(2) + ')';
-        ctx.fillRect(x,y,T,T);
-        ctx.strokeStyle = 'rgba(160,255,255,' + Math.min(1, t/90).toFixed(2) + ')';
-        ctx.strokeRect(x+0.5,y+0.5,T-1,T-1);
-      }
-    } else if(ch==='^'){
-      ctx.fillStyle = '#ff8a3d';
-      for(let i=0;i<3;i++){
-        ctx.beginPath();
-        ctx.moveTo(x+i*10+2, y+T); ctx.lineTo(x+i*10+6, y+10); ctx.lineTo(x+i*10+10, y+T);
-        ctx.fill();
-      }
+  // платформы
+  for (var i = 0; i < lvl.platforms.length; i++) {
+    var p = lvl.platforms[i];
+    ctx.fillStyle = '#1c2b3d'; ctx.fillRect(p.x, p.y, p.w, p.h);
+    ctx.fillStyle = '#2c4a63'; ctx.fillRect(p.x, p.y, p.w, 6);
+  }
+  // мосты: активные — бирюзовые, неактивные — пунктирный контур
+  for (var b = 0; b < bridges.length; b++) {
+    var br = bridges[b].r, on = bridges[b].timer > 0;
+    if (on) { ctx.fillStyle = '#43e8d8'; ctx.fillRect(br.x, br.y, br.w, br.h); }
+    else { ctx.strokeStyle = 'rgba(67,232,216,.35)'; ctx.setLineDash([6,6]);
+           ctx.strokeRect(br.x, br.y, br.w, br.h); ctx.setLineDash([]); }
+  }
+  // шипы
+  ctx.fillStyle = '#e8574f';
+  for (var s = 0; s < lvl.spikes.length; s++) {
+    var sp = lvl.spikes[s];
+    for (var x = sp.x; x < sp.x + sp.w; x += 20) {
+      ctx.beginPath(); ctx.moveTo(x, sp.y); ctx.lineTo(x + 10, sp.y - 18); ctx.lineTo(x + 20, sp.y); ctx.closePath(); ctx.fill();
     }
   }
-
   // чекпоинты
-  for(const cp of checkpoints){
-    ctx.fillStyle = cp.active ? '#5aff9e' : '#5a7a8a';
-    ctx.fillRect(cp.x+13, cp.y+2, 5, 30);
-    ctx.beginPath(); ctx.arc(cp.x+15.5, cp.y+2, 6, 0, 7);
-    ctx.fillStyle = cp.active ? '#5aff9e' : '#31424e'; ctx.fill();
+  for (var c = 0; c < lvl.checkpoints.length; c++) {
+    var cp = lvl.checkpoints[c];
+    ctx.fillStyle = (player.lastCheck && player.lastCheck >= cp.x) ? '#43e8d8' : '#5a6b7d';
+    ctx.fillRect(cp.x, cp.y - 50, 4, 50); ctx.fillRect(cp.x - 8, cp.y - 50, 20, 6);
   }
-
-  // цель — ядро
-  if(goal){
-    const gph = Math.sin(t*0.1)*3;
-    ctx.strokeStyle = 'rgba(90,255,158,0.9)'; ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.arc(goal.x+16, goal.y+16+gph, 10, 0, 7); ctx.stroke();
-    ctx.beginPath(); ctx.arc(goal.x+16, goal.y+16+gph, 15 + Math.sin(t*0.07)*3, 0, 7);
-    ctx.strokeStyle = 'rgba(90,255,158,0.4)'; ctx.stroke();
-  }
-
-  // эхо-импульс
-  if(pulse){
-    ctx.strokeStyle = 'rgba(90,230,255,' + (1 - pulse.r/240).toFixed(2) + ')';
-    ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.arc(pulse.x, pulse.y, pulse.r, 0, 7); ctx.stroke();
-  }
+  // ядро
+  var core = lvl.core;
+  ctx.fillStyle = 'rgba(243,196,72,.25)';
+  ctx.beginPath(); ctx.arc(core.x + 14, core.y + 14, 30 + Math.sin(t/20)*4, 0, 7); ctx.fill();
+  ctx.fillStyle = '#f3c448';
+  ctx.beginPath(); ctx.arc(core.x + 14, core.y + 14, 14, 0, 7); ctx.fill();
 
   // враги
-  for(const e of enemies){
-    const blink = e.stun>0 && Math.floor(t/4)%2===0;
-    ctx.fillStyle = blink ? '#9aa7b8' : '#ff8a3d';
-    ctx.fillRect(e.x, e.y, e.w, e.h-6);
-    ctx.fillStyle = '#22303f'; ctx.fillRect(e.x+4, e.y+6, e.w-8, 7); // визор
-    if(e.stun > 0){ ctx.fillStyle='#9ee7ff'; ctx.fillRect(e.x+4,e.y+6,6,7); }
-    ctx.fillStyle = '#ff8a3d';
-    ctx.fillRect(e.x+2, e.y+e.h-6, e.w-4, 4); // сопло
+  for (var e = 0; e < enemies.length; e++) {
+    var en = enemies[e];
+    if (en.stun > 0) {
+      ctx.fillStyle = en.flash > 0 ? '#ffffff' : '#7a8aa0';
+    } else ctx.fillStyle = '#e08a3c';
+    ctx.fillRect(en.x, en.y, en.w, en.h);
+    ctx.fillStyle = '#0a0e14';
+    var eye = en.stun > 0 ? 2 : 4;
+    ctx.fillRect(en.x + 6, en.y + 8, eye, eye); ctx.fillRect(en.x + en.w - 6 - eye, en.y + 8, eye, eye);
+    if (en.stun > 0) { ctx.strokeStyle = '#43e8d8'; ctx.beginPath(); ctx.arc(en.x + en.w/2, en.y + en.h/2, 24 + Math.sin(t/5)*3, 0, 7); ctx.stroke(); }
   }
 
   // игрок
-  const p = player;
-  if(!(p.iFr > 0 && Math.floor(t/4)%2===0)){
-    ctx.fillStyle = '#8a6a48'; ctx.fillRect(p.x, p.y, p.w, p.h);           // бронза
-    ctx.fillStyle = '#2b3a4a'; ctx.fillRect(p.x+3, p.y+p.h-7, p.w-6, 7);   // шасси
-    ctx.fillStyle = '#4de0ff';                                             // визор
-    ctx.fillRect(p.x + (p.face>0 ? p.w-10 : 3), p.y+5, 8, 5);
+  if (!(player.invuln > 0 && Math.floor(t/4) % 2 === 0)) {
+    ctx.fillStyle = player.dashT > 0 ? '#9ffff2' : '#37c9b8';
+    ctx.fillRect(player.x, player.y, player.w, player.h);
+    ctx.fillStyle = '#43e8d8';
+    ctx.fillRect(player.x + (player.face > 0 ? 16 : 6), player.y + 8, 6, 4);
   }
-
+  // кольцо
+  if (ring) {
+    ctx.strokeStyle = 'rgba(67,232,216,' + Math.max(0, 1 - ring.r/PULSE_RADIUS) + ')';
+    ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(ring.x, ring.y, ring.r, 0, 7); ctx.stroke(); ctx.lineWidth = 1;
+  }
   ctx.restore();
 
   // HUD
-  for(let i=0;i<3;i++){
-    ctx.fillStyle = i < player.health ? '#ff5a7a' : '#333d4a';
-    ctx.fillRect(14+i*24, 12, 18, 16);
-  }
-  ctx.fillStyle = '#cfe6f5'; ctx.font = '14px monospace';
-  ctx.fillText('Уровень ' + (level+1) + '/' + LEVELS.length + '   сложность x' + adapt.toFixed(2), 14, 46);
-  ctx.fillStyle = '#7f95a8'; ctx.font = '12px monospace';
-  ctx.fillText('\u2190\u2192 движение \u2022 SPACE прыжок \u2022 SHIFT рывок \u2022 E эхо-импульс \u2022 R рестарт', 14, H-12);
+  ctx.fillStyle = '#cfe8ff'; ctx.font = '14px monospace';
+  ctx.fillText('Уровень ' + (levelIdx + 1) + '/' + LEVELS.length, 12, 22);
+  ctx.fillText('HP: ' + player.hp, 12, 40);
+  ctx.fillStyle = player.pulseCd > 0 ? '#5a6b7d' : '#43e8d8';
+  ctx.fillText(player.pulseCd > 0 ? 'ИМПУЛЬС: перезарядка' : 'ИМПУЛЬС: готов (E)', 12, 58);
+  ctx.fillStyle = '#cfe8ff';
+  ctx.fillText('Сложность x' + diff.toFixed(2), 12, 76);
 
-  if(state === 'start'){
-    ctx.fillStyle = 'rgba(8,12,18,0.85)'; ctx.fillRect(0,0,W,H);
-    ctx.fillStyle = '#4de0ff'; ctx.font = 'bold 42px monospace'; ctx.textAlign = 'center';
-    ctx.fillText('Э Х О   Р У И Н', W/2, 220);
-    ctx.fillStyle = '#cfe6f5'; ctx.font = '16px monospace';
-    ctx.fillText('Прототип игрового проекта (кейс-задачи 3-5)', W/2, 262);
-    ctx.fillText('\u2190\u2192 движение, SPACE прыжок, SHIFT рывок,', W/2, 300);
-    ctx.fillText('E \u2014 эхо-импульс: открывает мосты и оглушает дронов', W/2, 326);
-    ctx.fillStyle = '#5aff9e';
-    ctx.fillText('\u2014 нажмите любую клавишу \u2014', W/2, 400);
-    ctx.textAlign = 'left';
-  }
-  if(won){
-    ctx.fillStyle = 'rgba(8,12,18,0.85)'; ctx.fillRect(0,0,W,H);
-    ctx.fillStyle = '#5aff9e'; ctx.font = 'bold 36px monospace'; ctx.textAlign = 'center';
-    ctx.fillText('ЯДРО АКТИВИРОВАНО', W/2, 250);
-    ctx.fillStyle = '#cfe6f5'; ctx.font = '16px monospace';
-    ctx.fillText('Смертей: ' + deaths + ' \u2022 итоговая сложность x' + adapt.toFixed(2), W/2, 300);
-    ctx.fillText('Обновите страницу (F5), чтобы пройти заново', W/2, 340);
-    ctx.textAlign = 'left';
+  if (t - lastDeath < 90 && deaths > 0) {
+    ctx.fillStyle = 'rgba(232,87,79,.9)'; ctx.font = 'bold 22px monospace';
+    ctx.fillText('СБОЙ СИСТЕМЫ... ПЕРЕЗАПУСК С ЧЕКПОИНТА', W/2 - 230, H/2 - 60);
+    ctx.font = '14px monospace';
   }
 }
 
-// ---------- ЦИКЛ И ВВОД ----------
-addEventListener('keydown', e => {
-  if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) e.preventDefault();
-  keys[e.code] = true;
-  if(!e.repeat) pressed[e.code] = true;
-  if(e.code === 'KeyR' && state === 'play') loadLevel(level);
-  if(state === 'start') state = 'play';
-});
-addEventListener('keyup', e => { keys[e.code] = false; });
+function loop() {
+  if (state === 'play') { update(); draw(); }
+  requestAnimationFrame(loop);
+}
+
+function startGame() {
+  document.getElementById('overlay').style.display = 'none';
+  levelIdx = 0; loadLevel(0); state = 'play';
+  try { cv.focus(); } catch(e) {}
+}
+
+// клик по оверлею, клик по странице в целом и любая клавиша — всё запускает игру
+document.getElementById('overlay').addEventListener('click', startGame);
+document.addEventListener('mousedown', function() { if (state === 'menu') startGame(); });
+window.addEventListener('keydown', function() { if (state === 'menu') startGame(); });
 
 loadLevel(0);
-let t = 0;
-(function loop(){ t++; update(); draw(); requestAnimationFrame(loop); })();
+loop();
+})();
 </script>
 </body>
 </html>
