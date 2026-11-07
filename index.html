@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>ЭХО РУИН — прототип (кейс-задача 5)</title>
+<style>
+  html,body{margin:0;padding:0;background:#0b0f14;display:flex;justify-content:center;align-items:center;min-height:100vh;}
+  canvas{border:1px solid #223;box-shadow:0 0 40px rgba(60,220,220,.08);}
+</style>
+</head>
+<body>
+<canvas id="g" width="960" height="540"></canvas>
+<script>
+"use strict";
+// ================== ЭХО РУИН: браузерный прототип ==================
+// Механики: движение+прыжок (coyote time, jump buffer), рывок с i-frames,
+// эхо-импульс (сонар: открывает скрытые мосты, оглушает врагов),
+// враги-дроны (патруль/погоня), шипы, чекпоинты, адаптивная сложность, 2 уровня.
+
+const cvs = document.getElementById('g'), ctx = cvs.getContext('2d');
+const T = 32, W = cvs.width, H = cvs.height;
+const GRAV = 0.5, JUMP = -11.5, SPD = 3.4;
+
+// ---------- УРОВНИ ('#' стена, '~' скрытый мост, '^' шипы, P игрок, E враг, C чекпоинт, G цель) ----------
+const LEVELS = [
+[
+"##############################################",
+"#............................................#",
+"#............................................#",
+"#............................................#",
+"#............................................#",
+"#............................................#",
+"#............................................#",
+"#.............###............................#",
+"#...............................E............#",
+"#.......###..................###.............#",
+"#............................................#",
+"#.P.........E.............C...E.............G#",
+"#.................^~~~^.............^~~~^....#",
+"##############################################"
+],
+[
+"##############################################",
+"#............................................#",
+"#............................................#",
+"#............................................#",
+"#............................................#",
+"#................E...........................#",
+"#..............###...........................#",
+"#....................E.......................#",
+"#...................###......................#",
+"#...###.......................###............#",
+"#............................................#",
+"#......E.........E..^^.........EC...........G#",
+"#.........^~~~^.........^~~~^.....^~~~^......#",
+"##############################################"
+]
+];
+
+// ---------- СОСТОЯНИЕ ----------
+let level = 0, grid = [], cols = 0, rows = 0;
+let player = null, enemies = [], checkpoints = [], goal = null;
+let revealed = new Map(), pulse = null, pulseCd = 0;
+let adapt = 1.0, deaths = 0, sinceDeath = 0, won = false, state = 'start';
+let cam = {x:0, y:0};
+const keys = {}, pressed = {};
+
+// ---------- ЗАГРУЗКА УРОВНЯ ----------
+function loadLevel(i){
+  grid = LEVELS[i].map(r => r.split(''));
+  rows = grid.length; cols = grid[0].length;
+  enemies = []; checkpoints = []; goal = null; revealed = new Map(); pulse = null; pulseCd = 0;
+  let spawn = {x:64, y:64};
+  for(let r=0; r<rows; r++){
+    for(let c=0; c<cols; c++){
+      const ch = grid[r][c];
+      if(ch==='P'){ spawn = {x:c*T+5, y:r*T+4}; grid[r][c]='.'; }
+      else if(ch==='E'){ enemies.push({x:c*T+3, y:r*T+6, w:26, h:26, vx:0, vy:0, dir:1, stun:0, onG:false}); grid[r][c]='.'; }
+      else if(ch==='C'){ checkpoints.push({x:c*T, y:r*T, active:false}); grid[r][c]='.'; }
+      else if(ch==='G'){ goal = {x:c*T, y:r*T}; grid[r][c]='.'; }
+    }
+  }
+  player = {x:spawn.x, y:spawn.y, w:22, h:28, vx:0, vy:0, onG:false, coyote:0, jbuf:0,
+            face:1, dashT:0, dashCd:0, iFr:0, health:3, respawn:{x:spawn.x, y:spawn.y}};
+}
+
+// ---------- КОЛЛИЗИИ ----------
+function solid(c, r){
+  if(c<0 || c>=cols || r<0 || r>=rows) return true;
+  const ch = grid[r][c];
+  if(ch==='#') return true;
+  if(ch==='~' && (revealed.get(r*100+c)||0) > 0) return true;
+  return false;
+}
+function rectSolid(x, y, w, h){
+  const c0 = Math.floor(x/T), c1 = Math.floor((x+w-0.01)/T);
+  const r0 = Math.floor(y/T), r1 = Math.floor((y+h-0.01)/T);
+  for(let r=r0; r<=r1; r++) for(let c=c0; c<=c1; c++) if(solid(c,r)) return true;
+  return false;
+}
+function moveX(e, dx){
+  while(Math.abs(dx) > 0.001){
+    const s = Math.sign(dx);
+    if(rectSolid(e.x+s, e.y, e.w, e.h)){ e.vx = 0; return true; }
+    e.x += s; dx -= s;
+  }
+  return false;
+}
+function moveY(e, dy){
+  while(Math.abs(dy) > 0.001){
+    const s = Math.sign(dy);
+    if(rectSolid(e.x, e.y+s, e.w, e.h)){ e.vy = 0; return true; }
+    e.y += s; dy -= s;
+  }
+  return false;
+}
+function overlap(a, b){ return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y; }
+
+// ---------- ЭХО-ИМПУЛЬС ----------
+function firePulse(){
+  const px = player.x+player.w/2, py = player.y+player.h/2;
+  pulse = {x:px, y:py, r:0};
+  for(let r=0; r<rows; r++) for(let c=0; c<cols; c++){
+    if(grid[r][c]==='~'){
+      const dx = c*T+T/2-px, dy = r*T+T/2-py;
+      if(dx*dx+dy*dy <= 220*220) revealed.set(r*100+c, 320);
+    }
+  }
+  for(const e of enemies){
+    const dx = e.x+e.w/2-px, dy = e.y+e.h/2-py;
+    if(dx*dx+dy*dy <= 220*220) e.stun = 200;
+  }
+}
+
+// ---------- УРОН И СМЕРТЬ ----------
+function hurt(){
+  if(player.iFr > 0 || player.dashT > 0) return;
+  player.health--; player.iFr = 70; player.vy = -6; player.vx = -player.face*4;
+  if(player.health <= 0) die();
+}
+function die(){
+  deaths++; sinceDeath = 0;
+  adapt = Math.min(1.5, adapt + 0.15);          // адаптивная сложность: смерть повышает давление
+  player.x = player.respawn.x; player.y = player.respawn.y;
+  player.vx = 0; player.vy = 0; player.health = 3; player.iFr = 60;
+}
+
+// ---------- ОБНОВЛЕНИЕ ----------
+function update(){
+  if(state !== 'play' || won) return;
+  sinceDeath++;
+  if(sinceDeath > 1500){ adapt = Math.max(0.8, adapt - 0.05); sinceDeath = 0; }  // отдых снижает давление
+  const p = player;
+
+  // ввод
+  const dir = (keys.ArrowRight||keys.KeyD?1:0) - (keys.ArrowLeft||keys.KeyA?1:0);
+  if(dir) p.face = dir;
+
+  // рывок
+  if(pressed.ShiftLeft || pressed.ShiftRight || pressed.KeyX){
+    if(p.dashCd <= 0 && p.dashT <= 0){ p.dashT = 10; p.dashCd = 60; }
+  }
+  if(p.dashT > 0){ p.dashT--; p.vx = p.face*8; p.vy = 0; }
+  else {
+    p.vx += (dir*SPD - p.vx)*0.3;
+    p.vy += GRAV; if(p.vy > 12) p.vy = 12;
+  }
+
+  // прыжок: буфер + coyote time
+  if(pressed.Space || pressed.ArrowUp || pressed.KeyW) p.jbuf = 6;
+  if(p.jbuf > 0 && (p.onG || p.coyote > 0) && p.dashT <= 0){
+    p.vy = JUMP; p.jbuf = 0; p.coyote = 0;
+  }
+  if(p.jbuf > 0) p.jbuf--;
+
+  moveX(p, p.vx); moveY(p, p.vy);
+  p.onG = rectSolid(p.x, p.y+1, p.w, p.h);
+  p.coyote = p.onG ? 6 : Math.max(0, p.coyote-1);
+  if(p.dashCd > 0) p.dashCd--;
+  if(p.iFr > 0) p.iFr--;
+
+  // эхо-импульс
+  if(p.pulseCd > 0) p.pulseCd--;
+  if((pressed.KeyE || pressed.KeyQ) && p.pulseCd <= 0){ p.pulseCd = 90; firePulse(); }
+  if(pulse){ pulse.r += 14; if(pulse.r > 240) pulse = null; }
+  for(const [k, v] of revealed){ if(v <= 1) revealed.delete(k); else revealed.set(k, v-1); }
+
+  // падение в бездну
+  if(p.y > rows*T + 80) die();
+
+  // шипы (из сетки '^')
+  for(let r=0; r<rows; r++) for(let c=0; c<cols; c++){
+    if(grid[r][c]==='^'){
+      const s = {x:c*T+4, y:r*T+18, w:T-8, h:14};
+      if(overlap(p, s)) hurt();
+    }
+  }
+
+  // чекпоинты
+  for(const cp of checkpoints){
+    if(overlap(p, {x:cp.x, y:cp.y, w:T, h:T})){ cp.active = true; p.respawn = {x:cp.x+5, y:cp.y+4}; }
+  }
+
+  // цель
+  if(goal && overlap(p, {x:goal.x, y:goal.y, w:T, h:T})){
+    level++;
+    if(level >= LEVELS.length) won = true; else loadLevel(level);
+    return;
+  }
+
+  // враги
+  for(const e of enemies){
+    if(e.stun > 0){ e.stun--; continue; }
+    const px = p.x - e.x, py = p.y - e.y;
+    const chasing = Math.abs(px) < 170 && Math.abs(py) < 70;
+    const spd = (chasing ? 1.8 : 1.1) * adapt;
+    if(chasing) e.dir = Math.sign(px) || e.dir;
+    e.vx = e.dir * spd;
+    e.vy += GRAV; if(e.vy > 12) e.vy = 12;
+    const hitWall = moveX(e, e.vx);
+    moveY(e, e.vy);
+    e.onG = rectSolid(e.x, e.y+1, e.w, e.h);
+    if(hitWall) e.dir *= -1;
+    if(e.onG){ // не падать с уступа при патруле
+      const ahead = Math.floor((e.x + (e.dir>0 ? e.w+2 : -2))/T);
+      const below = Math.floor((e.y+e.h+2)/T);
+      if(!chasing && !solid(ahead, below)) e.dir *= -1;
+    }
+    if(overlap(p, e)){
+      if(p.dashT > 0) e.stun = 140;   // рывок оглушает
+      else hurt();
+    }
+  }
+
+  // камера
+  cam.x += ((p.x + p.w/2 - W/2) - cam.x)*0.12;
+  cam.y += ((p.y + p.h/2 - H/2) - cam.y)*0.12;
+  cam.x = Math.max(0, Math.min(cam.x, cols*T - W));
+  cam.y = Math.max(0, Math.min(cam.y, rows*T - H));
+
+  for(const k in pressed) pressed[k] = false;
+}
+
+// ---------- ОТРИСОВКА ----------
+function draw(){
+  // фон
+  const g1 = ctx.createLinearGradient(0,0,0,H);
+  g1.addColorStop(0,'#0b1220'); g1.addColorStop(1,'#141b26');
+  ctx.fillStyle = g1; ctx.fillRect(0,0,W,H);
+  // параллакс-руины
+  ctx.fillStyle = 'rgba(40,55,75,0.5)';
+  for(let i=0;i<8;i++){
+    const bx = ((i*260 - cam.x*0.3) % (W+300) + W+300) % (W+300) - 150;
+    ctx.fillRect(bx, H-260 - (i%3)*40, 120, 260);
+  }
+  ctx.fillStyle = 'rgba(28,40,58,0.8)';
+  for(let i=0;i<10;i++){
+    const bx = ((i*200 - cam.x*0.6) % (W+240) + W+240) % (W+240) - 120;
+    ctx.fillRect(bx, H-180, 90, 180);
+  }
+
+  ctx.save(); ctx.translate(-Math.round(cam.x), -Math.round(cam.y));
+
+  const c0 = Math.floor(cam.x/T), c1 = Math.min(cols-1, c0 + W/T + 1);
+  const r0 = Math.floor(cam.y/T), r1 = Math.min(rows-1, r0 + H/T + 1);
+  for(let r=r0; r<=r1; r++) for(let c=c0; c<=c1; c++){
+    const ch = grid[r][c], x = c*T, y = r*T;
+    if(ch==='#'){
+      ctx.fillStyle = '#3a4a5e'; ctx.fillRect(x,y,T,T);
+      ctx.fillStyle = '#4d6278'; ctx.fillRect(x,y,T,4);
+    } else if(ch==='~'){
+      const t = revealed.get(r*100+c) || 0;
+      if(t > 0){
+        ctx.fillStyle = 'rgba(70,220,220,' + Math.min(1, t/90).toFixed(2) + ')';
+        ctx.fillRect(x,y,T,T);
+        ctx.strokeStyle = 'rgba(160,255,255,' + Math.min(1, t/90).toFixed(2) + ')';
+        ctx.strokeRect(x+0.5,y+0.5,T-1,T-1);
+      }
+    } else if(ch==='^'){
+      ctx.fillStyle = '#ff8a3d';
+      for(let i=0;i<3;i++){
+        ctx.beginPath();
+        ctx.moveTo(x+i*10+2, y+T); ctx.lineTo(x+i*10+6, y+10); ctx.lineTo(x+i*10+10, y+T);
+        ctx.fill();
+      }
+    }
+  }
+
+  // чекпоинты
+  for(const cp of checkpoints){
+    ctx.fillStyle = cp.active ? '#5aff9e' : '#5a7a8a';
+    ctx.fillRect(cp.x+13, cp.y+2, 5, 30);
+    ctx.beginPath(); ctx.arc(cp.x+15.5, cp.y+2, 6, 0, 7);
+    ctx.fillStyle = cp.active ? '#5aff9e' : '#31424e'; ctx.fill();
+  }
+
+  // цель — ядро
+  if(goal){
+    const gph = Math.sin(t*0.1)*3;
+    ctx.strokeStyle = 'rgba(90,255,158,0.9)'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(goal.x+16, goal.y+16+gph, 10, 0, 7); ctx.stroke();
+    ctx.beginPath(); ctx.arc(goal.x+16, goal.y+16+gph, 15 + Math.sin(t*0.07)*3, 0, 7);
+    ctx.strokeStyle = 'rgba(90,255,158,0.4)'; ctx.stroke();
+  }
+
+  // эхо-импульс
+  if(pulse){
+    ctx.strokeStyle = 'rgba(90,230,255,' + (1 - pulse.r/240).toFixed(2) + ')';
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(pulse.x, pulse.y, pulse.r, 0, 7); ctx.stroke();
+  }
+
+  // враги
+  for(const e of enemies){
+    const blink = e.stun>0 && Math.floor(t/4)%2===0;
+    ctx.fillStyle = blink ? '#9aa7b8' : '#ff8a3d';
+    ctx.fillRect(e.x, e.y, e.w, e.h-6);
+    ctx.fillStyle = '#22303f'; ctx.fillRect(e.x+4, e.y+6, e.w-8, 7); // визор
+    if(e.stun > 0){ ctx.fillStyle='#9ee7ff'; ctx.fillRect(e.x+4,e.y+6,6,7); }
+    ctx.fillStyle = '#ff8a3d';
+    ctx.fillRect(e.x+2, e.y+e.h-6, e.w-4, 4); // сопло
+  }
+
+  // игрок
+  const p = player;
+  if(!(p.iFr > 0 && Math.floor(t/4)%2===0)){
+    ctx.fillStyle = '#8a6a48'; ctx.fillRect(p.x, p.y, p.w, p.h);           // бронза
+    ctx.fillStyle = '#2b3a4a'; ctx.fillRect(p.x+3, p.y+p.h-7, p.w-6, 7);   // шасси
+    ctx.fillStyle = '#4de0ff';                                             // визор
+    ctx.fillRect(p.x + (p.face>0 ? p.w-10 : 3), p.y+5, 8, 5);
+  }
+
+  ctx.restore();
+
+  // HUD
+  for(let i=0;i<3;i++){
+    ctx.fillStyle = i < player.health ? '#ff5a7a' : '#333d4a';
+    ctx.fillRect(14+i*24, 12, 18, 16);
+  }
+  ctx.fillStyle = '#cfe6f5'; ctx.font = '14px monospace';
+  ctx.fillText('Уровень ' + (level+1) + '/' + LEVELS.length + '   сложность x' + adapt.toFixed(2), 14, 46);
+  ctx.fillStyle = '#7f95a8'; ctx.font = '12px monospace';
+  ctx.fillText('\u2190\u2192 движение \u2022 SPACE прыжок \u2022 SHIFT рывок \u2022 E эхо-импульс \u2022 R рестарт', 14, H-12);
+
+  if(state === 'start'){
+    ctx.fillStyle = 'rgba(8,12,18,0.85)'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle = '#4de0ff'; ctx.font = 'bold 42px monospace'; ctx.textAlign = 'center';
+    ctx.fillText('Э Х О   Р У И Н', W/2, 220);
+    ctx.fillStyle = '#cfe6f5'; ctx.font = '16px monospace';
+    ctx.fillText('Прототип игрового проекта (кейс-задачи 3-5)', W/2, 262);
+    ctx.fillText('\u2190\u2192 движение, SPACE прыжок, SHIFT рывок,', W/2, 300);
+    ctx.fillText('E \u2014 эхо-импульс: открывает мосты и оглушает дронов', W/2, 326);
+    ctx.fillStyle = '#5aff9e';
+    ctx.fillText('\u2014 нажмите любую клавишу \u2014', W/2, 400);
+    ctx.textAlign = 'left';
+  }
+  if(won){
+    ctx.fillStyle = 'rgba(8,12,18,0.85)'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle = '#5aff9e'; ctx.font = 'bold 36px monospace'; ctx.textAlign = 'center';
+    ctx.fillText('ЯДРО АКТИВИРОВАНО', W/2, 250);
+    ctx.fillStyle = '#cfe6f5'; ctx.font = '16px monospace';
+    ctx.fillText('Смертей: ' + deaths + ' \u2022 итоговая сложность x' + adapt.toFixed(2), W/2, 300);
+    ctx.fillText('Обновите страницу (F5), чтобы пройти заново', W/2, 340);
+    ctx.textAlign = 'left';
+  }
+}
+
+// ---------- ЦИКЛ И ВВОД ----------
+addEventListener('keydown', e => {
+  if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) e.preventDefault();
+  keys[e.code] = true;
+  if(!e.repeat) pressed[e.code] = true;
+  if(e.code === 'KeyR' && state === 'play') loadLevel(level);
+  if(state === 'start') state = 'play';
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+
+loadLevel(0);
+let t = 0;
+(function loop(){ t++; update(); draw(); requestAnimationFrame(loop); })();
+</script>
+</body>
+</html>
